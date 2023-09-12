@@ -1,0 +1,932 @@
+---
+title: "s"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+date: "2023-05-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(lubridate)
+library(dplyr)
+library(reshape2)
+library(xgboost)
+library(C50)
+library(e1071)
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+#outlier for price and replace the outier with the maximum
+q1 <- quantile(train$price, 0.25)
+q3 <- quantile(train$price, 0.75)
+iqr <- q3 - q1
+upper <- q3 + 1.5 * iqr
+lower <- q1 - 1.5 * iqr
+maxi <- max(train[train$price<=upper,8])
+train$price <- ifelse(train$price>upper,maxi, train$price)
+test$price <- ifelse(test$price>upper,maxi, test$price)
+
+#outlier for recommendedPrice and replace the outier with the maximum
+q1 <- quantile(train$recommendedPrice, 0.25)
+q3 <- quantile(train$recommendedPrice, 0.75)
+iqr <- q3 - q1
+upper <- q3 + 1.5 * iqr
+lower <- q1 - 1.5 * iqr
+maxi <- max(train[train$recommendedPrice<=upper,9])
+train$recommendedPrice <- ifelse(train$recommendedPrice>upper,maxi, train$recommendedPrice)
+test$recommendedPrice <- ifelse(test$recommendedPrice>upper,maxi, test$recommendedPrice)
+
+#outlier for typeCode and replace the outier with the maximum
+q1 <- quantile(train$typeCode, 0.25)
+q3 <- quantile(train$typeCode, 0.75)
+iqr <- q3 - q1
+upper <- q3 + 1.5 * iqr
+lower <- q1 - 1.5 * iqr
+maxi <- max(train[train$typeCode<=upper,7])
+train$typeCode <- ifelse(train$typeCode>upper,maxi, train$typeCode)
+test$typeCode <- ifelse(test$typeCode>upper,maxi, test$typeCode)
+
+#column named for colorCode and and replace the outier with the maximum
+q1 <- quantile(train$colorCode, 0.25)
+q3 <- quantile(train$colorCode, 0.75)
+iqr <- q3 - q1
+upper <- q3 + 1.5 * iqr
+lower <- q1 - 1.5 * iqr
+maxi <- max(train[train$colorCode<=upper,5])
+train$colorCode <- ifelse(train$colorCode>upper,maxi, train$colorCode)
+test$colorCode <- ifelse(test$colorCode>upper,maxi, test$colorCode)
+
+#count the unique of column price being return and give restriction whether 0 have a high chance of return while 1 have less chance of return
+train$count <- 1
+data <- train %>% group_by(return, price) %>% summarise(counting=sum(count))
+data_0 <- data[data$return==0,]
+data_1 <- data[data$return==1,]
+now <- data_0[order(data_0$counting),]
+new <- data_1[order(data_1$counting),]
+train$chance <- ifelse(train$price %in% now$price[1:32], 0, 1)
+train$chances <- ifelse(train$price %in% new$price[1:32], 1, 0)
+test$chance <- ifelse(test$price %in% now$price[1:32], 0, 1)
+test$chances <- ifelse(test$price %in% new$price[1:32], 1, 0)
+train <- train[,-16]
+
+#create new column named ordermonth
+train$ordermonth <- month(train$orderDate)
+test$ordermonth <- month(test$orderDate)
+
+#create new column name orderday
+train$orderday <- wday(as.Date(train$orderDate))
+test$orderday <- wday(as.Date(test$orderDate))
+
+#create new column named orderdays
+train$orderdays <- day(as.Date(train$orderDate))
+test$orderdays <- day(as.Date(test$orderDate))
+
+#delete orderID
+train1 <- train[,]
+test1 <- test[,]
+
+#add new column named monthlysale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group1 <- as.data.frame(train %>% group_by(ordermonth) %>% summarise(monthlysale=sum(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(ordermonth) %>% summarise(monthlysale=sum(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(ordermonth) %>% summarise(monthlysalem=mean(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(ordermonth) %>% summarise(monthlysalem=mean(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(ordermonth) %>% summarise(monthlysaleme=median(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(ordermonth) %>% summarise(monthlysaleme=median(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(ordermonth) %>% summarise(monthlysaleme1=min(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(ordermonth) %>% summarise(monthlysaleme1=min(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(ordermonth) %>% summarise(monthlysaleme2=max(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(ordermonth) %>% summarise(monthlysaleme2=max(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(ordermonth) %>% summarise(monthlysaleme3=quantile(price, 0.25)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(ordermonth) %>% summarise(monthlysaleme3=quantile(price, 0.25)))
+test1 <- merge(test1, data_group11, all=TRUE)
+data_group1 <- as.data.frame(train %>% group_by(ordermonth) %>% summarise(monthlysaleme4=quantile(price, 0.75)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(ordermonth) %>% summarise(monthlysaleme4=quantile(price, 0.75)))
+test1 <- merge(test1, data_group11, all=TRUE)
+data_group1 <- as.data.frame(train %>% group_by(ordermonth) %>% mutate(monthlysaleme5=cumsum(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(ordermonth) %>% mutate(monthlysaleme5=cumsum(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+data_group1 <- as.data.frame(train %>% count(ordermonth, name="one"))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% count(ordermonth, name="one"))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+#add new column named daysale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group1 <- as.data.frame(train %>% group_by(price) %>% summarise(daysale=sum(recommendedPrice)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(price) %>% summarise(daysale=sum(recommendedPrice)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(price) %>% summarise(daysalem=mean(recommendedPrice)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(price) %>% summarise(daysalem=mean(recommendedPrice)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(price) %>% summarise(daysaleme=median(recommendedPrice)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(price) %>% summarise(daysaleme=median(recommendedPrice)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(price) %>% summarise(daysaleme1=min(recommendedPrice)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(price) %>% summarise(daysaleme1=min(recommendedPrice)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(price) %>% summarise(daysaleme2=max(recommendedPrice)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(price) %>% summarise(daysaleme2=max(recommendedPrice)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(price) %>% summarise(daysaleme3=quantile(recommendedPrice, 0.25)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(price) %>% summarise(daysaleme3=quantile(recommendedPrice, 0.25)))
+test1 <- merge(test1, data_group11, all=TRUE)
+data_group1 <- as.data.frame(train %>% group_by(price) %>% summarise(daysaleme4=quantile(recommendedPrice, 0.75)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(price) %>% summarise(daysaleme4=quantile(recommendedPrice, 0.75)))
+test1 <- merge(test1, data_group11, all=TRUE)
+data_group1 <- as.data.frame(train %>% group_by(price) %>% mutate(daysaleme5=cumsum(recommendedPrice)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(price) %>% mutate(daysaleme5=cumsum(recommendedPrice)))
+test1 <- merge(test1, data_group11, all=TRUE)
+data_group1 <- as.data.frame(train %>% count(price, name="eleven"))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% count(price, name="eleven"))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+#add new column named daysales include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group1 <- as.data.frame(train %>% group_by(orderdays) %>% summarise(daysales=sum(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(orderdays) %>% summarise(daysales=sum(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(orderdays) %>% summarise(daysalesm=mean(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(orderdays) %>% summarise(daysalesm=mean(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(orderdays) %>% summarise(daysalesme=median(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(orderdays) %>% summarise(daysalesme=median(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(orderdays) %>% summarise(daysalesme1=min(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(orderdays) %>% summarise(daysalesme1=min(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(orderdays) %>% summarise(daysalesme2=max(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(orderdays) %>% summarise(daysalesme2=max(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+data_group1 <- as.data.frame(train %>% group_by(orderdays) %>% summarise(daysalesme3=quantile(price, 0.25)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(orderdays) %>% summarise(daysalesme3=quantile(price, 0.25)))
+test1 <- merge(test1, data_group11, all=TRUE)
+data_group1 <- as.data.frame(train %>% group_by(orderdays) %>% summarise(daysalesme4=quantile(price, 0.75)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(orderdays) %>% summarise(daysalesme4=quantile(price, 0.75)))
+test1 <- merge(test1, data_group11, all=TRUE)
+data_group1 <- as.data.frame(train %>% group_by(orderdays) %>% mutate(daysalesme5=cumsum(price)))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% group_by(orderdays) %>% mutate(daysalesme5=cumsum(price)))
+test1 <- merge(test1, data_group11, all=TRUE)
+data_group1 <- as.data.frame(train %>% count(orderdays, name="twelth"))
+train1 <- merge(train1, data_group1, all=TRUE)
+data_group11 <- as.data.frame(test %>% count(orderdays, name="twelth"))
+test1 <- merge(test1, data_group11, all=TRUE)
+
+
+#add new column named Idsale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group2 <- as.data.frame(train %>% group_by(itemID) %>% summarise(Idsale=sum(price)))
+train1 <- merge(train1, data_group2, all=TRUE)
+data_group22 <- as.data.frame(test %>% group_by(itemID) %>% summarise(Idsale=sum(price)))
+test1 <- merge(test1, data_group22, all=TRUE)
+
+data_group2 <- as.data.frame(train %>% group_by(itemID) %>% summarise(Idsalem=mean(price)))
+train1 <- merge(train1, data_group2, all=TRUE)
+data_group22 <- as.data.frame(test %>% group_by(itemID) %>% summarise(Idsalem=mean(price)))
+test1 <- merge(test1, data_group22, all=TRUE)
+
+data_group2 <- as.data.frame(train %>% group_by(itemID) %>% summarise(Idsaleme=median(price)))
+train1 <- merge(train1, data_group2, all=TRUE)
+data_group22 <- as.data.frame(test %>% group_by(itemID) %>% summarise(Idsaleme=median(price)))
+test1 <- merge(test1, data_group22, all=TRUE)
+
+data_group2 <- as.data.frame(train %>% group_by(itemID) %>% summarise(Idsaleme1=min(price)))
+train1 <- merge(train1, data_group2, all=TRUE)
+data_group22 <- as.data.frame(test %>% group_by(itemID) %>% summarise(Idsaleme1=min(price)))
+test1 <- merge(test1, data_group22, all=TRUE)
+
+data_group2 <- as.data.frame(train %>% group_by(itemID) %>% summarise(Idsaleme2=max(price)))
+train1 <- merge(train1, data_group2, all=TRUE)
+data_group22 <- as.data.frame(test %>% group_by(itemID) %>% summarise(Idsaleme2=max(price)))
+test1 <- merge(test1, data_group22, all=TRUE)
+
+data_group2 <- as.data.frame(train %>% group_by(itemID) %>% summarise(Idsaleme3=quantile(price, 0.25)))
+train1 <- merge(train1, data_group2, all=TRUE)
+data_group22 <- as.data.frame(test %>% group_by(itemID) %>% summarise(Idsaleme3=quantile(price, 0.25)))
+test1 <- merge(test1, data_group22, all=TRUE)
+data_group2 <- as.data.frame(train %>% group_by(itemID) %>% summarise(Idsaleme4=quantile(price, 0.75)))
+train1 <- merge(train1, data_group2, all=TRUE)
+data_group22 <- as.data.frame(test %>% group_by(itemID) %>% summarise(Idsaleme4=quantile(price, 0.75)))
+test1 <- merge(test1, data_group22, all=TRUE)
+data_group2 <- as.data.frame(train %>% group_by(itemID) %>% mutate(Idsaleme5=cumsum(price)))
+train1 <- merge(train1, data_group2, all=TRUE)
+data_group22 <- as.data.frame(test %>% group_by(itemID) %>% mutate(Idsaleme5=cumsum(price)))
+test1 <- merge(test1, data_group22, all=TRUE)
+data_group2 <- as.data.frame(train %>% count(itemID, name="two"))
+train1 <- merge(train1, data_group2, all=TRUE)
+data_group22 <- as.data.frame(test %>% count(itemID, name="two"))
+test1 <- merge(test1, data_group22, all=TRUE)
+
+
+#add new column named codesale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group3 <- as.data.frame(train %>% group_by(sizeCode) %>% summarise(codesale=sum(price)))
+train1 <- merge(train1, data_group3, all=TRUE)
+data_group33 <- as.data.frame(test %>% group_by(sizeCode) %>% summarise(codesale=sum(price)))
+test1 <- merge(test1, data_group33, all=TRUE)
+
+data_group3 <- as.data.frame(train %>% group_by(sizeCode) %>% summarise(codesalem=mean(price)))
+train1 <- merge(train1, data_group3, all=TRUE)
+data_group33 <- as.data.frame(test %>% group_by(sizeCode) %>% summarise(codesalem=mean(price)))
+test1 <- merge(test1, data_group33, all=TRUE)
+
+data_group3 <- as.data.frame(train %>% group_by(sizeCode) %>% summarise(codesaleme=median(price)))
+train1 <- merge(train1, data_group3, all=TRUE)
+data_group33 <- as.data.frame(test %>% group_by(sizeCode) %>% summarise(codesaleme=median(price)))
+test1 <- merge(test1, data_group33, all=TRUE)
+
+data_group3 <- as.data.frame(train %>% group_by(sizeCode) %>% summarise(codesaleme1=min(price)))
+train1 <- merge(train1, data_group3, all=TRUE)
+data_group33 <- as.data.frame(test %>% group_by(sizeCode) %>% summarise(codesaleme1=min(price)))
+test1 <- merge(test1, data_group33, all=TRUE)
+
+data_group3 <- as.data.frame(train %>% group_by(sizeCode) %>% summarise(codesaleme2=max(price)))
+train1 <- merge(train1, data_group3, all=TRUE)
+data_group33 <- as.data.frame(test %>% group_by(sizeCode) %>% summarise(codesaleme2=max(price)))
+test1 <- merge(test1, data_group33, all=TRUE)
+
+data_group3 <- as.data.frame(train %>% group_by(sizeCode) %>% summarise(codesaleme3=quantile(price, 0.25)))
+train1 <- merge(train1, data_group3, all=TRUE)
+data_group33 <- as.data.frame(test %>% group_by(sizeCode) %>% summarise(codesaleme3=quantile(price, 0.25)))
+test1 <- merge(test1, data_group33, all=TRUE)
+data_group3 <- as.data.frame(train %>% group_by(sizeCode) %>% summarise(codesaleme4=quantile(price, 0.75)))
+train1 <- merge(train1, data_group3, all=TRUE)
+data_group33 <- as.data.frame(test %>% group_by(sizeCode) %>% summarise(codesaleme4=quantile(price, 0.75)))
+test1 <- merge(test1, data_group33, all=TRUE)
+data_group3 <- as.data.frame(train %>% group_by(sizeCode) %>% mutate(codesaleme5=cumsum(price)))
+train1 <- merge(train1, data_group3, all=TRUE)
+data_group33 <- as.data.frame(test %>% group_by(sizeCode) %>% mutate(codesaleme5=cumsum(price)))
+test1 <- merge(test1, data_group33, all=TRUE)
+data_group3 <- as.data.frame(train %>% count(sizeCode, name="three"))
+train1 <- merge(train1, data_group3, all=TRUE)
+data_group33 <- as.data.frame(test %>% count(sizeCode, name="three"))
+test1 <- merge(test1, data_group33, all=TRUE)
+
+
+#add new column named ordersale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group4 <- as.data.frame(train %>% group_by(orderID) %>% summarise(ordersale=sum(price)))
+train1 <- merge(train1, data_group4, all=TRUE)
+data_group44 <- as.data.frame(test %>% group_by(orderID) %>% summarise(ordersale=sum(price)))
+test1 <- merge(test1, data_group44, all=TRUE)
+
+data_group4 <- as.data.frame(train %>% group_by(orderID) %>% summarise(ordersalem=mean(price)))
+train1 <- merge(train1, data_group4, all=TRUE)
+data_group44 <- as.data.frame(test %>% group_by(orderID) %>% summarise(ordersalem=mean(price)))
+test1 <- merge(test1, data_group44, all=TRUE)
+
+data_group4 <- as.data.frame(train %>% group_by(orderID) %>% summarise(ordersaleme=median(price)))
+train1 <- merge(train1, data_group4, all=TRUE)
+data_group44 <- as.data.frame(test %>% group_by(orderID) %>% summarise(ordersaleme=median(price)))
+test1 <- merge(test1, data_group44, all=TRUE)
+
+data_group4 <- as.data.frame(train %>% group_by(orderID) %>% summarise(ordersaleme1=min(price)))
+train1 <- merge(train1, data_group4, all=TRUE)
+data_group44 <- as.data.frame(test %>% group_by(orderID) %>% summarise(ordersaleme1=min(price)))
+test1 <- merge(test1, data_group44, all=TRUE)
+
+data_group4 <- as.data.frame(train %>% group_by(orderID) %>% summarise(ordersaleme2=max(price)))
+train1 <- merge(train1, data_group4, all=TRUE)
+data_group44 <- as.data.frame(test %>% group_by(orderID) %>% summarise(ordersaleme2=max(price)))
+test1 <- merge(test1, data_group44, all=TRUE)
+
+data_group4 <- as.data.frame(train %>% group_by(orderID) %>% summarise(ordersaleme3=quantile(price, 0.25)))
+train1 <- merge(train1, data_group4, all=TRUE)
+data_group44 <- as.data.frame(test %>% group_by(orderID) %>% summarise(ordersaleme3=quantile(price, 0.25)))
+test1 <- merge(test1, data_group44, all=TRUE)
+data_group4 <- as.data.frame(train %>% group_by(orderID) %>% summarise(ordersaleme4=quantile(price, 0.75)))
+train1 <- merge(train1, data_group4, all=TRUE)
+data_group44 <- as.data.frame(test %>% group_by(orderID) %>% summarise(ordersaleme4=quantile(price, 0.75)))
+test1 <- merge(test1, data_group44, all=TRUE)
+data_group4 <- as.data.frame(train %>% group_by(orderID) %>% mutate(ordersaleme5=cumsum(price)))
+train1 <- merge(train1, data_group4, all=TRUE)
+data_group44 <- as.data.frame(test %>% group_by(orderID) %>% mutate(ordersaleme5=cumsum(price)))
+test1 <- merge(test1, data_group44, all=TRUE)
+data_group4 <- as.data.frame(train %>% count(orderID, name="four"))
+train1 <- merge(train1, data_group4, all=TRUE)
+data_group44 <- as.data.frame(test %>% count(orderID, name="four"))
+test1 <- merge(test1, data_group44, all=TRUE)
+
+
+#add new column named colorsale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group5 <- as.data.frame(train %>% group_by(colorCode) %>% summarise(colorsale=sum(price)))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% group_by(colorCode) %>% summarise(colorsale=sum(price)))
+test1 <- merge(test1, data_group55, all=TRUE)
+
+data_group5 <- as.data.frame(train %>% group_by(colorCode) %>% summarise(colorsalem=mean(price)))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% group_by(colorCode) %>% summarise(colorsalem=mean(price)))
+test1 <- merge(test1, data_group55, all=TRUE)
+
+data_group5 <- as.data.frame(train %>% group_by(colorCode) %>% summarise(colorsaleme=median(price)))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% group_by(colorCode) %>% summarise(colorsaleme=median(price)))
+test1 <- merge(test1, data_group55, all=TRUE)
+
+data_group5 <- as.data.frame(train %>% group_by(colorCode) %>% summarise(colorsaleme1=min(price)))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% group_by(colorCode) %>% summarise(colorsaleme1=min(price)))
+test1 <- merge(test1, data_group55, all=TRUE)
+
+data_group5 <- as.data.frame(train %>% group_by(colorCode) %>% summarise(colorsaleme2=max(price)))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% group_by(colorCode) %>% summarise(colorsaleme2=max(price)))
+test1 <- merge(test1, data_group55, all=TRUE)
+
+data_group5 <- as.data.frame(train %>% group_by(colorCode) %>% summarise(colorsaleme3=quantile(price, 0.25)))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% group_by(colorCode) %>% summarise(colorsaleme3=quantile(price, 0.25)))
+test1 <- merge(test1, data_group55, all=TRUE)
+data_group5 <- as.data.frame(train %>% group_by(colorCode) %>% summarise(colorsaleme4=quantile(price, 0.75)))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% group_by(colorCode) %>% summarise(colorsaleme4=quantile(price, 0.75)))
+test1 <- merge(test1, data_group55, all=TRUE)
+data_group5 <- as.data.frame(train %>% group_by(colorCode) %>% mutate(colorsaleme5=cumsum(price)))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% group_by(colorCode) %>% mutate(colorsaleme5=cumsum(price)))
+test1 <- merge(test1, data_group55, all=TRUE)
+data_group5 <- as.data.frame(train %>% count(colorCode, name="five"))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% count(colorCode, name="five"))
+test1 <- merge(test1, data_group55, all=TRUE)
+
+
+#add new column named difference
+train1$difference <- train1$price - train1$recommendedPrice
+test1$difference <- test1$price - test1$recommendedPrice
+
+#add new column named vidsale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group6 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vidsale=sum(price)))
+train1 <- merge(train1, data_group6, all=TRUE)
+data_group66 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vidsale=sum(price)))
+test1 <- merge(test1, data_group66, all=TRUE)
+
+data_group6 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vidsalem=mean(price)))
+train1 <- merge(train1, data_group6, all=TRUE)
+data_group66 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vidsalem=mean(price)))
+test1 <- merge(test1, data_group66, all=TRUE)
+
+data_group6 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vidsaleme=median(price)))
+train1 <- merge(train1, data_group6, all=TRUE)
+data_group66 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vidsaleme=median(price)))
+test1 <- merge(test1, data_group66, all=TRUE)
+
+data_group6 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vidsaleme1=min(price)))
+train1 <- merge(train1, data_group6, all=TRUE)
+data_group66 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vidsaleme1=min(price)))
+test1 <- merge(test1, data_group66, all=TRUE)
+
+data_group6 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vidsaleme2=max(price)))
+train1 <- merge(train1, data_group6, all=TRUE)
+data_group66 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vidsaleme2=max(price)))
+test1 <- merge(test1, data_group66, all=TRUE)
+
+data_group5 <- as.data.frame(train %>% group_by(colorCode) %>% summarise(colorsaleme3=quantile(price, 0.25)))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% group_by(colorCode) %>% summarise(colorsaleme3=quantile(price, 0.25)))
+test1 <- merge(test1, data_group55, all=TRUE)
+data_group5 <- as.data.frame(train %>% group_by(colorCode) %>% summarise(colorsaleme4=quantile(price, 0.75)))
+train1 <- merge(train1, data_group5, all=TRUE)
+data_group55 <- as.data.frame(test %>% group_by(colorCode) %>% summarise(colorsaleme4=quantile(price, 0.75)))
+test1 <- merge(test1, data_group55, all=TRUE)
+data_group6 <- as.data.frame(train %>% group_by(voucherID) %>% mutate(vidsaleme5=cumsum(price)))
+train1 <- merge(train1, data_group6, all=TRUE)
+data_group66 <- as.data.frame(test %>% group_by(voucherID) %>% mutate(vidsaleme5=cumsum(price)))
+test1 <- merge(test1, data_group66, all=TRUE)
+data_group6 <- as.data.frame(train %>% count(voucherID, name="six"))
+train1 <- merge(train1, data_group6, all=TRUE)
+data_group66 <- as.data.frame(test %>% count(voucherID, name="six"))
+test1 <- merge(test1, data_group66, all=TRUE)
+
+
+#add new column named customersale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group7 <- as.data.frame(train %>% group_by(customerID) %>% summarise(customersale=sum(price)))
+train1 <- merge(train1, data_group7, all=TRUE)
+data_group77 <- as.data.frame(test %>% group_by(customerID) %>% summarise(customersale=sum(price)))
+test1 <- merge(test1, data_group77, all=TRUE)
+
+data_group7 <- as.data.frame(train %>% group_by(customerID) %>% summarise(customersalem=mean(price)))
+train1 <- merge(train1, data_group7, all=TRUE)
+data_group77 <- as.data.frame(test %>% group_by(customerID) %>% summarise(customersalem=mean(price)))
+test1 <- merge(test1, data_group77, all=TRUE)
+
+data_group7 <- as.data.frame(train %>% group_by(customerID) %>% summarise(customersaleme=median(price)))
+train1 <- merge(train1, data_group7, all=TRUE)
+data_group77 <- as.data.frame(test %>% group_by(customerID) %>% summarise(customersaleme=median(price)))
+test1 <- merge(test1, data_group77, all=TRUE)
+
+data_group7 <- as.data.frame(train %>% group_by(customerID) %>% summarise(customersaleme1=min(price)))
+train1 <- merge(train1, data_group7, all=TRUE)
+data_group77 <- as.data.frame(test %>% group_by(customerID) %>% summarise(customersaleme1=min(price)))
+test1 <- merge(test1, data_group77, all=TRUE)
+
+data_group7 <- as.data.frame(train %>% group_by(customerID) %>% summarise(customersaleme2=max(price)))
+train1 <- merge(train1, data_group7, all=TRUE)
+data_group77 <- as.data.frame(test %>% group_by(customerID) %>% summarise(customersaleme2=max(price)))
+test1 <- merge(test1, data_group77, all=TRUE)
+
+data_group7 <- as.data.frame(train %>% group_by(customerID) %>% summarise(customersaleme3=quantile(price, 0.25)))
+train1 <- merge(train1, data_group7, all=TRUE)
+data_group77 <- as.data.frame(test %>% group_by(customerID) %>% summarise(customersaleme3=quantile(price, 0.25)))
+test1 <- merge(test1, data_group77, all=TRUE)
+data_group7 <- as.data.frame(train %>% group_by(customerID) %>% summarise(customersaleme4=quantile(price, 0.75)))
+train1 <- merge(train1, data_group7, all=TRUE)
+data_group77 <- as.data.frame(test %>% group_by(customerID) %>% summarise(customersaleme4=quantile(price, 0.75)))
+test1 <- merge(test1, data_group77, all=TRUE)
+data_group7 <- as.data.frame(train %>% group_by(customerID) %>% mutate(customersaleme5=cumsum(price)))
+train1 <- merge(train1, data_group7, all=TRUE)
+data_group77 <- as.data.frame(test %>% group_by(customerID) %>% mutate(customersaleme5=cumsum(price)))
+test1 <- merge(test1, data_group77, all=TRUE)
+data_group7 <- as.data.frame(train %>% count(customerID, name="seven"))
+train1 <- merge(train1, data_group7, all=TRUE)
+data_group77 <- as.data.frame(test %>% count(customerID, name="seven"))
+test1 <- merge(test1, data_group77, all=TRUE)
+
+
+#add new column named devicesale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group8 <- as.data.frame(train %>% group_by(deviceCode) %>% summarise(devicesale=sum(price)))
+train1 <- merge(train1, data_group8, all=TRUE)
+data_group88 <- as.data.frame(test %>% group_by(deviceCode) %>% summarise(devicesale=sum(price)))
+test1 <- merge(test1, data_group88, all=TRUE)
+
+data_group8 <- as.data.frame(train %>% group_by(deviceCode) %>% summarise(devicesalem=mean(price)))
+train1 <- merge(train1, data_group8, all=TRUE)
+data_group88 <- as.data.frame(test %>% group_by(deviceCode) %>% summarise(devicesalem=mean(price)))
+test1 <- merge(test1, data_group88, all=TRUE)
+
+data_group8 <- as.data.frame(train %>% group_by(deviceCode) %>% summarise(devicesaleme=median(price)))
+train1 <- merge(train1, data_group8, all=TRUE)
+data_group88 <- as.data.frame(test %>% group_by(deviceCode) %>% summarise(devicesaleme=median(price)))
+test1 <- merge(test1, data_group88, all=TRUE)
+
+data_group8 <- as.data.frame(train %>% group_by(deviceCode) %>% summarise(devicesaleme1=min(price)))
+train1 <- merge(train1, data_group8, all=TRUE)
+data_group88 <- as.data.frame(test %>% group_by(deviceCode) %>% summarise(devicesaleme1=min(price)))
+test1 <- merge(test1, data_group88, all=TRUE)
+
+data_group8 <- as.data.frame(train %>% group_by(deviceCode) %>% summarise(devicesaleme2=max(price)))
+train1 <- merge(train1, data_group8, all=TRUE)
+data_group88 <- as.data.frame(test %>% group_by(deviceCode) %>% summarise(devicesaleme2=max(price)))
+test1 <- merge(test1, data_group88, all=TRUE)
+
+data_group8 <- as.data.frame(train %>% group_by(deviceCode) %>% summarise(devicesaleme3=quantile(price, 0.25)))
+train1 <- merge(train1, data_group8, all=TRUE)
+data_group88 <- as.data.frame(test %>% group_by(deviceCode) %>% summarise(devicesaleme3=quantile(price, 0.25)))
+test1 <- merge(test1, data_group88, all=TRUE)
+data_group8 <- as.data.frame(train %>% group_by(deviceCode) %>% summarise(devicesaleme4=quantile(price, 0.75)))
+train1 <- merge(train1, data_group8, all=TRUE)
+data_group88 <- as.data.frame(test %>% group_by(deviceCode) %>% summarise(devicesaleme4=quantile(price, 0.75)))
+test1 <- merge(test1, data_group88, all=TRUE)
+data_group8 <- as.data.frame(train %>% group_by(deviceCode) %>% mutate(devicesaleme5=cumsum(price)))
+train1 <- merge(train1, data_group8, all=TRUE)
+data_group88 <- as.data.frame(test %>% group_by(deviceCode) %>% mutate(devicesaleme5=cumsum(price)))
+test1 <- merge(test1, data_group88, all=TRUE)
+data_group8 <- as.data.frame(train %>% count(deviceCode, name="eight"))
+train1 <- merge(train1, data_group8, all=TRUE)
+data_group88 <- as.data.frame(test %>% count(deviceCode, name="eight"))
+test1 <- merge(test1, data_group88, all=TRUE)
+
+
+#add new column named paymentsale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group9 <- as.data.frame(train %>% group_by(paymentCode) %>% summarise(paymentsale=sum(price)))
+train1 <- merge(train1, data_group9, all=TRUE)
+data_group99 <- as.data.frame(test %>% group_by(paymentCode) %>% summarise(paymentsale=sum(price)))
+test1 <- merge(test1, data_group99, all=TRUE)
+
+data_group9 <- as.data.frame(train %>% group_by(paymentCode) %>% summarise(paymentsalem=mean(price)))
+train1 <- merge(train1, data_group9, all=TRUE)
+data_group99 <- as.data.frame(test %>% group_by(paymentCode) %>% summarise(paymentsalem=mean(price)))
+test1 <- merge(test1, data_group99, all=TRUE)
+
+data_group9 <- as.data.frame(train %>% group_by(paymentCode) %>% summarise(paymentsaleme=median(price)))
+train1 <- merge(train1, data_group9, all=TRUE)
+data_group99 <- as.data.frame(test %>% group_by(paymentCode) %>% summarise(paymentsaleme=median(price)))
+test1 <- merge(test1, data_group99, all=TRUE)
+
+data_group9 <- as.data.frame(train %>% group_by(paymentCode) %>% summarise(paymentsaleme1=min(price)))
+train1 <- merge(train1, data_group9, all=TRUE)
+data_group99 <- as.data.frame(test %>% group_by(paymentCode) %>% summarise(paymentsaleme1=min(price)))
+test1 <- merge(test1, data_group99, all=TRUE)
+
+data_group9 <- as.data.frame(train %>% group_by(paymentCode) %>% summarise(paymentsaleme2=max(price)))
+train1 <- merge(train1, data_group9, all=TRUE)
+data_group99 <- as.data.frame(test %>% group_by(paymentCode) %>% summarise(paymentsaleme2=max(price)))
+test1 <- merge(test1, data_group99, all=TRUE)
+
+data_group9 <- as.data.frame(train %>% group_by(paymentCode) %>% summarise(paymentsaleme3=quantile(price, 0.25)))
+train1 <- merge(train1, data_group9, all=TRUE)
+data_group99 <- as.data.frame(test %>% group_by(paymentCode) %>% summarise(paymentsaleme3=quantile(price, 0.25)))
+test1 <- merge(test1, data_group99, all=TRUE)
+data_group9 <- as.data.frame(train %>% group_by(paymentCode) %>% summarise(paymentsaleme4=quantile(price, 0.75)))
+train1 <- merge(train1, data_group9, all=TRUE)
+data_group99 <- as.data.frame(test %>% group_by(paymentCode) %>% summarise(paymentsaleme4=quantile(price, 0.75)))
+test1 <- merge(test1, data_group99, all=TRUE)
+data_group9 <- as.data.frame(train %>% group_by(paymentCode) %>% mutate(paymentsaleme5=cumsum(price)))
+train1 <- merge(train1, data_group9, all=TRUE)
+data_group99 <- as.data.frame(test %>% group_by(paymentCode) %>% mutate(paymentsaleme5=cumsum(price)))
+test1 <- merge(test1, data_group99, all=TRUE)
+data_group9 <- as.data.frame(train %>% count(paymentCode, name="nine"))
+train1 <- merge(train1, data_group9, all=TRUE)
+data_group99 <- as.data.frame(test %>% count(paymentCode, name="nine"))
+test1 <- merge(test1, data_group99, all=TRUE)
+
+
+#add new column named vsale include sum, mean, median, min, max, quantile1, quantile3, cumsum, and count
+data_group10 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vsale=sum(voucherAmount)))
+train1 <- merge(train1, data_group10, all=TRUE)
+data_group1010 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vsale=sum(voucherAmount)))
+test1 <- merge(test1, data_group1010, all=TRUE)
+
+data_group10 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vsalem=mean(voucherAmount)))
+train1 <- merge(train1, data_group10, all=TRUE)
+data_group1010 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vsalem=mean(voucherAmount)))
+test1 <- merge(test1, data_group1010, all=TRUE)
+
+data_group10 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vsaleme=median(voucherAmount)))
+train1 <- merge(train1, data_group10, all=TRUE)
+data_group1010 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vsaleme=median(voucherAmount)))
+test1 <- merge(test1, data_group1010, all=TRUE)
+
+data_group10 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vsaleme1=min(voucherAmount)))
+train1 <- merge(train1, data_group10, all=TRUE)
+data_group1010 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vsaleme1=min(voucherAmount)))
+test1 <- merge(test1, data_group1010, all=TRUE)
+
+data_group10 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vsaleme2=max(voucherAmount)))
+train1 <- merge(train1, data_group10, all=TRUE)
+data_group1010 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vsaleme2=max(voucherAmount)))
+test1 <- merge(test1, data_group1010, all=TRUE)
+
+data_group10 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vsaleme3=quantile(voucherAmount, 0.25)))
+train1 <- merge(train1, data_group10, all=TRUE)
+data_group1010 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vsaleme3=quantile(voucherAmount, 0.25)))
+test1 <- merge(test1, data_group1010, all=TRUE)
+data_group10 <- as.data.frame(train %>% group_by(voucherID) %>% summarise(vsaleme4=quantile(voucherAmount, 0.75)))
+train1 <- merge(train1, data_group10, all=TRUE)
+data_group1010 <- as.data.frame(test %>% group_by(voucherID) %>% summarise(vsaleme4=quantile(voucherAmount, 0.75)))
+test1 <- merge(test1, data_group1010, all=TRUE)
+data_group10 <- as.data.frame(train %>% group_by(voucherID) %>% mutate(vsaleme5=cumsum(voucherAmount)))
+train1 <- merge(train1, data_group10, all=TRUE)
+data_group1010 <- as.data.frame(test %>% group_by(voucherID) %>% mutate(vsaleme5=cumsum(voucherAmount)))
+test1 <- merge(test1, data_group1010, all=TRUE)
+data_group10 <- as.data.frame(train %>% count(voucherID, name="ten"))
+train1 <- merge(train1, data_group10, all=TRUE)
+data_group1010 <- as.data.frame(test %>% count(voucherID, name="ten"))
+test1 <- merge(test1, data_group1010, all=TRUE)
+
+#add new column named item and give a restriction and then convert to numeric then merge with the original data
+data_group11 <- data.frame(sizeCode=c("A","I",20:50,60:102,"S","L","M"), item=c(rep(0,2), rep(1,31), rep(2,43), rep(3,3)))
+train1 <- merge(train1, data_group11, all.x=TRUE)
+test1 <- merge(test1, data_group11, all.x=TRUE)
+
+#add new column named ranged
+train1$ranged <- train1$monthlysaleme4 - train1$monthlysaleme3
+test1$ranged <- test1$monthlysaleme4 - test1$monthlysaleme3
+
+#add new column named ranges
+train1$ranges <- train1$monthlysaleme2 - train1$monthlysaleme1
+test1$ranges <- test1$monthlysaleme2 - test1$monthlysaleme1
+
+#create lag variables which is about 61 one of them for both train and test
+test1 <- test1 %>% group_by(orderDate) %>%
+  mutate(price_lead1 = lead(price, n = 1),
+         price_lead2 = lead(price, n = 2),
+         price_lead3 = lead(price, n = 3),
+         price_lead4 = lead(price, n = 4),
+         price_lead5 = lead(price, n = 5),
+         price_lead6 = lead(price, n = 6),
+         price_lead7 = lead(price, n = 7),
+         price_lead8 = lead(price, n = 8),
+         price_lead9 = lead(price, n = 9),
+         price_lead10 = lead(price, n = 10),
+         price_lead11 = lead(price, n = 11),
+         price_lead12 = lead(price, n = 12),
+         price_lead13 = lead(price, n = 13),
+         price_lead14 = lead(price, n = 14),
+         price_lead15 = lead(price, n = 15),
+         price_lead16 = lead(price, n = 16),
+         price_lead17 = lead(price, n = 17),
+         price_lead18 = lead(price, n = 18),
+         price_lead19 = lead(price, n = 19),
+         price_lead20 = lead(price, n = 20),
+         price_lead21 = lead(price, n = 21),
+         price_lead22 = lead(price, n = 22),
+         price_lead23 = lead(price, n = 23),
+         price_lead24 = lead(price, n = 24),
+         price_lead25 = lead(price, n = 25),
+         price_lead26 = lead(price, n = 26),
+         price_lead27 = lead(price, n = 27),
+         price_lead28 = lead(price, n = 28),
+         price_lead29 = lead(price, n = 29),
+         price_lead30 = lead(price, n = 30),
+         price_lead31 = lead(price, n = 31),
+         price_lead32 = lead(price, n = 32),
+         price_lead33 = lead(price, n = 33),
+         price_lead34 = lead(price, n = 34),
+         price_lead35 = lead(price, n = 35),
+         price_lead36 = lead(price, n = 36),
+         price_lead37 = lead(price, n = 37),
+         price_lead38 = lead(price, n = 38),
+         price_lead39 = lead(price, n = 39),
+         price_lead40 = lead(price, n = 40),
+         price_lead41 = lead(price, n = 41),
+         price_lead42 = lead(price, n = 42),
+         price_lead43 = lead(price, n = 43),
+         price_lead44 = lead(price, n = 44),
+         price_lead45 = lead(price, n = 45),
+         price_lead46 = lead(price, n = 46),
+         price_lead47 = lead(price, n = 47),
+         price_lead48 = lead(price, n = 48),
+         price_lead49 = lead(price, n = 49),
+         price_lead50 = lead(price, n = 50),
+         price_lead51 = lead(price, n = 51),
+         price_lead52 = lead(price, n = 52),
+         price_lead53 = lead(price, n = 53),
+         price_lead54 = lead(price, n = 54),
+         price_lead55 = lead(price, n = 55),
+         price_lead56 = lead(price, n = 56),
+         price_lead57 = lead(price, n = 57),
+         price_lead58 = lead(price, n = 58),
+         price_lead59 = lead(price, n = 59),
+         price_lead60 = lead(price, n = 60),
+         price_lead61 = lead(price, n = 61))
+
+train1 <- train1 %>% group_by(orderDate) %>%
+  mutate(price_lead1 = lag(price, n = 1),
+         price_lead2 = lag(price, n = 2),
+         price_lead3 = lag(price, n = 3),
+         price_lead4 = lag(price, n = 4),
+         price_lead5 = lag(price, n = 5),
+         price_lead6 = lag(price, n = 6),
+         price_lead7 = lag(price, n = 7),
+         price_lead8 = lag(price, n = 8),
+         price_lead9 = lag(price, n = 9),
+         price_lead10 = lag(price, n = 10),
+         price_lead11 = lag(price, n = 11),
+         price_lead12 = lag(price, n = 12),
+         price_lead13 = lag(price, n = 13),
+         price_lead14 = lag(price, n = 14),
+         price_lead15 = lag(price, n = 15),
+         price_lead16 = lag(price, n = 16),
+         price_lead17 = lag(price, n = 17),
+         price_lead18 = lag(price, n = 18),
+         price_lead19 = lag(price, n = 19),
+         price_lead20 = lag(price, n = 20),
+         price_lead21 = lag(price, n = 21),
+         price_lead22 = lag(price, n = 22),
+         price_lead23 = lag(price, n = 23),
+         price_lead24 = lag(price, n = 24),
+         price_lead25 = lag(price, n = 25),
+         price_lead26 = lag(price, n = 26),
+         price_lead27 = lag(price, n = 27),
+         price_lead28 = lag(price, n = 28),
+         price_lead29 = lag(price, n = 29),
+         price_lead30 = lag(price, n = 30),
+         price_lead31 = lag(price, n = 31),
+         price_lead32 = lag(price, n = 32),
+         price_lead33 = lag(price, n = 33),
+         price_lead34 = lag(price, n = 34),
+         price_lead35 = lag(price, n = 35),
+         price_lead36 = lag(price, n = 36),
+         price_lead37 = lag(price, n = 37),
+         price_lead38 = lag(price, n = 38),
+         price_lead39 = lag(price, n = 39),
+         price_lead40 = lag(price, n = 40),
+         price_lead41 = lag(price, n = 41),
+         price_lead42 = lag(price, n = 42),
+         price_lead43 = lag(price, n = 43),
+         price_lead44 = lag(price, n = 44),
+         price_lead45 = lag(price, n = 45),
+         price_lead46 = lag(price, n = 46),
+         price_lead47 = lag(price, n = 47),
+         price_lead48 = lag(price, n = 48),
+         price_lead49 = lag(price, n = 49),
+         price_lead50 = lag(price, n = 50),
+         price_lead51 = lag(price, n = 51),
+         price_lead52 = lag(price, n = 52),
+         price_lead53 = lag(price, n = 53),
+         price_lead54 = lag(price, n = 54),
+         price_lead55 = lag(price, n = 55),
+         price_lead56 = lag(price, n = 56),
+         price_lead57 = lag(price, n = 57),
+         price_lead58 = lag(price, n = 58),
+         price_lead59 = lag(price, n = 59),
+         price_lead60 = lag(price, n = 60),
+         price_lead61 = lag(price, n = 61))
+
+#Lag variables had missing value thus the following code is like mean imputation
+train1[] <- lapply(train1, function(x) ifelse(is.na(x), mean(x, na.rm = TRUE), x))
+test1[] <- lapply(test1, function(x) ifelse(is.na(x), mean(x, na.rm = TRUE), x))
+```
+
+
+```{r}
+#convert categorical to numerical column
+
+library(fastDummies)
+#prepare for character to numerical
+dataframe1 <- data.frame(voucherID=unique(train1$voucherID), voucherID_n=1:length(unique(train1$voucherID)))
+dataframe4 <- data.frame(customerID=unique(train1$customerID), customerID_n=1:length(unique(train1$customerID)))
+dataframe5 <- data.frame(colorCode=unique(train1$colorCode), colorCode_n=1:length(unique(train1$colorCode)))
+dataframe6 <- data.frame(orderID=unique(train1$orderID), orderID_n=1:length(unique(train1$orderID)))
+dataframe7 <- data.frame(sizeCode=unique(train1$sizeCode), sizeCode_n=1:length(unique(train1$sizeCode)))
+dataframe8 <- data.frame(itemID=unique(train1$itemID), itemID_n=1:length(unique(train1$itemID)))
+
+#turn character variable into numerical
+train1 <- merge(train1, dataframe1, all=TRUE)
+train1 <- merge(train1, dataframe4, all=TRUE)
+train1 <- merge(train1, dataframe5, all=TRUE)
+train1 <- merge(train1, dataframe6, all=TRUE)
+train1 <- merge(train1, dataframe7, all=TRUE)
+train1 <- merge(train1, dataframe8, all=TRUE)
+
+#prepare for character to numerical
+dataframe1 <- data.frame(voucherID=unique(test1$voucherID), voucherID_n=1:length(unique(test1$voucherID)))
+dataframe4 <- data.frame(customerID=unique(test1$customerID), customerID_n=1:length(unique(test1$customerID)))
+dataframe5 <- data.frame(colorCode=unique(test1$colorCode), colorCode_n=1:length(unique(test1$colorCode)))
+dataframe6 <- data.frame(orderID=unique(test1$orderID), orderID_n=1:length(unique(test1$orderID)))
+dataframe7 <- data.frame(sizeCode=unique(test1$sizeCode), sizeCode_n=1:length(unique(test1$sizeCode)))
+dataframe8 <- data.frame(itemID=unique(test1$itemID), itemID_n=1:length(unique(test1$itemID)))
+
+#turn character variable into numerical
+test1 <- merge(test1, dataframe1, all.x=TRUE)
+test1 <- merge(test1, dataframe4, all.x=TRUE)
+test1 <- merge(test1, dataframe5, all.x=TRUE)
+test1 <- merge(test1, dataframe6, all.x=TRUE)
+test1 <- merge(test1, dataframe7, all.x=TRUE)
+test1 <- merge(test1, dataframe8, all.x=TRUE)
+#dummy columns for 
+train11 <- dummy_cols(train1, select_columns=c("deviceCode", "paymentCode"))
+test11 <- dummy_cols(test1, select_columns=c("deviceCode", "paymentCode"))
+
+#remove column itemID, sizeCode, orderID, colorCode, customerID, deviceCode, paymentCode, voucherID, and orderDate
+train11 <- train11[,-c(1,2,3,4,5,6,7,8,13)]
+test11 <- test11[,-c(1,2,3,4,5,6,7,8,13)]
+train11 <- train11[order(train11$recordID),]
+test11 <- test11[order(test11$recordID),]
+train11_y <- train11$return
+train11_x <- train11[,-8]
+```
+
+
+
+
+```{r}
+#light boost; 
+library(lightgbm)
+set.seed(99)
+params <- list(objective = "binary",
+               metric = "binary_logloss",
+               boosting_type = "gbdt",
+               num_leaves = 75,
+               learning_rate = 0.05,
+               nthread = 2)
+
+lgb_model <- lgb.train(params = params,
+                       data = lgb.Dataset(as.matrix(train11_x), label = train11_y),
+                       num_boost_round = 300)
+
+# Make predictions
+predictions <- predict(lgb_model, data = as.matrix(test11))
+predictions <- ifelse(predictions<0.5, 0, 1)
+
+write.csv(data.frame(recordID=test$recordID, return=predictions), "light_decimal_add.csv", row.names=FALSE)
+read.csv("light_decimal_add.csv")
+```
+
+```{r}
+#logistic model
+# xgb_model <- glm(return~., data=train11, family="binomial", control=list(maxit=75))
+# predict1 <- predict(xgb_model, newdata=test11, type="response")
+# predict1 <- ifelse(predict1<0.5, 0, 1)
+# predict1
+# write.csv(data.frame(recordID=test$recordID, return=predict), "log_decimal_add.csv", row.names=FALSE)
+# read.csv("log_decimal_add.csv")
+```
+
+
+```{r}
+#feature selection for xgboost
+# library(xgboost)
+# model <- xgboost(data=as.matrix(train11_x), label=as.matrix(train11_y), nrounds=300, max_depth=1, eta=0.4, objective="binary:logistic")
+# importance_matrix <- xgb.importance(feature_names = colnames(test11), model = model)
+# print(importance_matrix)
+# importance_matrix
+# # Remove less important features
+# threshold <- 0.0003
+# important_features <- importance_matrix$Feature[importance_matrix$Gain > threshold]
+# train11_new <- train11_x[, important_features]
+# test11_new <- test11[, important_features]
+# tail(importance_matrix, 20)
+# test11_new
+# train11_new
+```
+
+```{r}
+#5-fold cv using xgboost
+# set.seed(23)
+# randoming2 <- sample(nrow(train11), nrow(train11), replace=FALSE)
+# data <- train11[randoming2,]
+# train1 <- data[1:920,]
+# train2 <- data[921:1840,]
+# train3 <- data[1841:2760,]
+# train4 <- data[2761:3680,]
+# train5 <- data[3681:4601,]
+# 
+# #5 ready used train and test data
+# train11 <- rbind(train2, train3, train4, train5)
+# test11 <- train1[,-8]
+# actual11 <- train1[,8]
+# train22 <- rbind(train1, train3, train4, train5)
+# test22 <- train2[,-8]
+# actual22 <- train2[,8]
+# train33 <- rbind(train1, train2, train4, train5)
+# test33 <- train3[,-8]
+# actual33 <- train3[,8]
+# train44 <- rbind(train1, train2, train3, train5)
+# test44 <- train4[,-8]
+# actual44 <- train4[,8]
+# train55 <- rbind(train1, train2, train3, train4)
+# test55 <- train5[,-8]
+# actual55 <- train5[,8]
+# 
+# #Models
+# #xgboost first CV
+# model1 <- xgboost(data=as.matrix(train11[,-8]), label=as.matrix(train11[,8]), nrounds=300, max_depth=3, eta=0.3, objective="binary:logistic")
+# predict1 <- predict(model1, newdata=as.matrix(test11), type="response")
+# predict1 <- ifelse(predict1 < 0.5, 0, 1)
+# #xgboost second CV
+# model2 <- xgboost(data=as.matrix(train22[,-8]), label=as.matrix(train22[,8]), nrounds=300, max_depth=3, eta=0.3, objective="binary:logistic")
+# predict2 <- predict(model2, newdata=as.matrix(test22), type="response")
+# predict2 <- ifelse(predict2 < 0.5, 0, 1)
+# #xgboost third CV
+# model3 <- xgboost(data=as.matrix(train33[,-8]), label=as.matrix(train33[,8]), nrounds=300, max_depth=3, eta=0.3, objective="binary:logistic")
+# predict3 <- predict(model3, newdata=as.matrix(test33), type="response")
+# predict3 <- ifelse(predict3 < 0.5, 0, 1)
+# #xgboost fourth CV
+# model4 <- xgboost(data=as.matrix(train44[,-8]), label=as.matrix(train44[,8]), nrounds=300, max_depth=3, eta=0.3, objective="binary:logistic")
+# predict4 <- predict(model4, newdata=as.matrix(test44), type="response")
+# predict4 <- ifelse(predict4 < 0.5, 0, 1)
+# #xgboost fifth CV
+# model5 <- xgboost(data=as.matrix(train55[,-8]), label=as.matrix(train55[,8]), nrounds=300, max_depth=3, eta=0.3, objective="binary:logistic")
+# predict5 <- predict(model5, newdata=as.matrix(test55), type="response")
+# predict5 <- ifelse(predict5 < 0.5, 0, 1)
+# 
+# 
+# 
+# 
+# #Predicted value from all 3 models
+# xgboost_pred <- c(predict1, predict2, predict3, predict4, predict5)
+# 
+# #type1 and type2 error
+# table1 <- table(data[,8], xgboost_pred)
+# dataframe_xg <- (table1[2] + table1[3]) / (sum(table1))
+```
+
+
+
